@@ -1,0 +1,186 @@
+---
+title: "Project Part 2"
+author: "Vishwas Shivakumar"
+date: "04/12/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE,warning=FALSE,echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fpp3)
+library(GGally)
+library(sugrrants)
+library(timetk)
+library(feasts)
+library(forecast)
+library(fable)
+library(ggplot2)
+```
+
+### Importing the dataset
+
+```{r,warning=FALSE,echo=FALSE }
+Median_price <- read.csv("/Users/vishwasshivakumar/Documents/VISHWAS/2nd sem/Time Series/project/Median_price.csv", header=TRUE,sep=",")
+Median_price$FixedDate <- as.Date(Median_price$date,format="%m/%d/%Y") #import data and fix date
+
+```
+
+Filtering the dataset for one city and exploring the data here we have selected Chicago
+
+```{r,warning=FALSE,echo=FALSE}
+dataset = subset(Median_price, select = -c(date) ) #remove extra date column
+colnames(dataset) <- c('RegionName','StateName','Price','date')
+  
+dataset <- dataset %>%
+  mutate(date = yearmonth(date)) 
+dataset <- as_tsibble(dataset, index = date,key = c(StateName,RegionName))
+
+saveRDS(dataset, "dataset.rds")
+
+MP <- dataset %>%
+  filter(RegionName == "Chicago") %>%
+  select(date,Price)# filter for chicago
+
+MP
+
+```
+
+Seasonal plot for chicago and an autoplot to see the time series data for the same.
+
+```{r,warning=FALSE,echo=FALSE}
+MP %>%
+  gg_season(Price, labels = "both")
+
+autoplot(MP)
+```
+
+Classical additive and Multiplicative decomposition of the timeseries.
+
+
+```{r,warning=FALSE,echo=FALSE}
+MP %>%
+  model(
+    classical_decomposition(Price, type = "additive")
+  ) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "Classical additive decomposition Median house price in chicago")
+
+MP %>%
+  model(
+    classical_decomposition(Price, type = "multiplicative")
+  ) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "Classical Multiplicative decomposition Median house price in chicago")
+
+```
+
+### Time Series Visulization for different cities
+
+```{r,warning=FALSE,echo=FALSE}
+WDC <- dataset %>%
+  filter(RegionName == "Washington") %>%
+  select(date,Price)# filter for chicago
+SF <- dataset %>%
+  filter(RegionName == "San Francisco") %>%
+  select(date,Price)# filter for chicago
+IND <- dataset %>%
+  filter(RegionName == "Indianapolis") %>%
+  select(date,Price)# filter for chicago
+
+autoplot(WDC)+labs(title = "Time Series Visualization of Washington")
+autoplot(SF)+labs(title = "Time Series Visualization of San Francisco")
+autoplot(IND)+labs(title = "Time Series Visualization of Indianapolis")
+```
+
+
+The Time series has a general upward trend but we can also see that in some housing markets there is a slight downward trend from 2008 to 2010, this can be attributed to the 2008 housing market crisis. We can also see a seasonal trend in the price, the price is at its highest mid year during the months of April to July. We can also see that the data is not stationary, we can see this in the Autocorrelation plot below since the time series has both trend and seasonality.
+
+
+```{r,warning=FALSE,echo=FALSE}
+MP %>%
+  ACF(Price) %>%
+  autoplot() + labs(title="Chicago House price")
+```
+
+Trying some simple forecasting methods Mean , Naive and Seasonal Naive
+
+```{r,warning=FALSE,echo=FALSE}
+train <- MP %>%
+  filter_index("2008 Apr" ~ "2018 Dec")
+# Fit the models
+MP_fit <- train %>%
+  model(
+    Mean = MEAN(Price),
+    `Naïve` = NAIVE(Price),
+    `Seasonal naïve` = SNAIVE(Price)
+  )
+# Generate forecasts for 14 quarters
+MP_fc <- MP_fit %>% forecast(h = 36)
+# Plot forecasts against actual values
+MP_fc %>%
+  autoplot(train, level = NULL) +
+  autolayer(
+    filter_index(MP, "2019 Jan" ~ .),
+    colour = "black"
+  ) +
+  labs(
+    y = "Price",
+    title = "Median House Price in Chicago"
+  ) +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+
+We can clearly see from the above Plot that the predictions are not accurate.And it should also be noted that the time series is not stationary.
+
+We now use differencing to make the time series stationary we tried both  first order and second order differencing here.
+
+
+```{r,warning=FALSE,echo=FALSE}
+MP %>% ACF(Price) %>% 
+  autoplot() 
+MP %>%
+  gg_tsdisplay(difference(Price, 12) %>% difference(),
+               plot_type='partial', lag=36) +
+  labs(title = "Double differenced", y="")
+```
+
+
+Our aim now is to find an appropriate ARIMA model based on the ACF and PACF plots above. The significant spike at lag 1 in the ACF suggests a non-seasonal MA(2) component. The significant spike at lag 3 in the ACF suggests a seasonal MA(1) component. Consequently, we begin with an ARIMA(0,1,2)(0,1,1) model, indicating a first difference, a seasonal difference, and non-seasonal MA(2) and seasonal MA(1) component. If we had started with the PACF, we may have selected an ARIMA(2,1,0)(0,1,1) model — using the PACF to select the non-seasonal part of the model and the ACF to select the seasonal part of the model. We will also include an automatically selected model. 
+
+
+```{r,warning=FALSE,echo=FALSE}
+fit <- MP %>%
+  model(
+    arima012011 = ARIMA(Price ~ pdq(0,1,2) + PDQ(0,1,1)),
+    arima210011 = ARIMA(Price ~ pdq(2,1,0) + PDQ(0,1,1)),
+    auto = ARIMA(Price, stepwise = FALSE, approx = FALSE)
+  )
+fit %>% pivot_longer(everything(), names_to = "Model name",
+                     values_to = "Orders")
+glance(fit) %>% arrange(AICc) %>% select(.model:BIC)
+```
+
+
+The residuals for the best model is shown below.
+
+
+```{r,warning=FALSE,echo=FALSE}
+fit %>% select(auto) %>% gg_tsresiduals(lag=36)
+```
+
+
+We now forecast using our Seasonal Arima model and the predictions are as excpected for the next 3 years(till 2024 dec)
+
+
+```{r,warning=FALSE,echo=FALSE}
+forecast(fit, h=36) %>%
+  filter(.model=='auto') %>%
+  autoplot(MP) +
+  labs(title = "Chicago House Price",
+       y="Price")
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
